@@ -1,9 +1,7 @@
 use crate::infrastructure::db::DB;
 use crate::model::file::File;
-use crate::model::server::{Server, SERVERS};
-use crate::rpc::rpc::DownloadRequest;
-use futures::compat::Future01CompatExt;
-use futures::io::SeekFrom;
+use crate::model::server::{next_server_id, Server, SERVERS};
+use bytes::Bytes;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::{Seek, Write};
@@ -14,50 +12,36 @@ pub struct Slice {
 }
 
 impl Slice {
-    pub fn new(from: &File) -> Self {
+    pub async fn upload(belong_to: &File, into_server: &Server, content: Vec<u8>) -> Self {
         let db = DB.lock().unwrap();
+        db.execute("INSERT INTO slice(from_file) VALUES (?);", &[belong_to.id])
+            .unwrap();
+        let id: u32 = db.last_insert_rowid() as _;
         db.execute(
-            "INSERT INTO slice(from_file) VALUES (?);
-        ",
-            &[from.id],
+            "INSERT INTO slice_server(slice_id, server_id)\
+                    VALUES (?, ?);",
+            &[id, into_server.id],
         )
         .unwrap();
-        let id: u32 = db.last_insert_rowid() as _;
+        drop(db);
+        into_server.upload(&format!("{}.slice", id), content).await;
         Slice { id }
     }
-    pub async fn download(&self) -> fs::File {
-        let in_server = DB
+    pub async fn download(&self) -> Bytes {
+        let server_id = DB
             .lock()
             .unwrap()
             .query_row(
-                "SELECT server_id FROM slice_server WHERE slice_id=?;",
+                "SELECT server_id \
+            FROM slice_server WHERE slice_id=?",
                 &[self.id],
-                |row| {
-                    let result: u32 = row.get(0).unwrap();
-                    Ok(result)
-                },
+                |rows| rows.get(0),
             )
             .unwrap();
-        let server: Server = SERVERS.get(&in_server).unwrap().clone();
-        let mut request = DownloadRequest::new();
-        request.set_Filename(format!("{}.slice", self.id));
-        let data: Vec<u8> = server
-            .client
-            .download_async(&request)
+        SERVERS
+            .get(&server_id)
             .unwrap()
-            .compat()
+            .download(&format!("{}.slice", self.id))
             .await
-            .unwrap()
-            .take_data();
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(format!("/download/{}.slice", self.id))
-            .unwrap();
-        file.write_all(&data).unwrap();
-        file.seek(SeekFrom::Start(0)).unwrap();
-        file
     }
 }

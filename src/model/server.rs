@@ -1,15 +1,15 @@
 use crate::infrastructure::db::DB;
-use crate::rpc::rpc_grpc::FileServiceClient;
-use grpcio::{ChannelBuilder, EnvBuilder};
+use bytes::Bytes;
+use reqwest::Client;
 use rusqlite::NO_PARAMS;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Server {
     pub id: u32,
-    pub client: FileServiceClient,
+    pub address: String,
+    pub client: Client,
 }
 
 lazy_static! {
@@ -17,23 +17,49 @@ lazy_static! {
         let mut result = HashMap::new();
         let db = DB.lock().unwrap();
         let mut stmt = db.prepare("SELECT * FROM server;").unwrap();
-        let kv = stmt
+        let servers = stmt
             .query_map(NO_PARAMS, |row| {
                 let id: u32 = row.get(0).unwrap();
-                let name: String = row.get(1).unwrap();
-                Ok((id, name))
+                let address: String = row.get(1).unwrap();
+                Ok(Server {
+                    id,
+                    address,
+                    client: reqwest::Client::new(),
+                })
             })
             .unwrap();
-        for item in kv {
-            let (id, address) = item.unwrap();
-            let env = Arc::new(EnvBuilder::new().build());
-            let ch = ChannelBuilder::new(env).connect(&address);
-            let client = FileServiceClient::new(ch);
-            result.insert(id, Server { id, client });
+        for server in servers {
+            let server = server.unwrap();
+            result.insert(server.id, server);
         }
         result
     };
     static ref next_id: AtomicU32 = AtomicU32::new(0);
+}
+
+impl Server {
+    pub async fn download(&self, filename: &str) -> Bytes {
+        self.client
+            .get(&self.address)
+            .query(&[("name", filename)])
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+    }
+    pub async fn upload(&self, filename: &str, content: Vec<u8>) -> bool {
+        self.client
+            .post(&self.address)
+            .query(&[("name", filename)])
+            .body(content)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            == 202
+    }
 }
 
 pub fn next_server_id() -> u32 {
@@ -41,4 +67,9 @@ pub fn next_server_id() -> u32 {
     let next = (result + 1) % SERVERS.len() as u32;
     next_id.store(next, Ordering::Relaxed);
     result + 1
+}
+
+pub fn next_server() -> &'static Server {
+    let server_id = next_server_id();
+    SERVERS.get(&server_id).unwrap()
 }
