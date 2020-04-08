@@ -4,12 +4,13 @@ use reqwest::Client;
 use rusqlite::NO_PARAMS;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::sync::Semaphore;
 
-#[derive(Clone)]
 pub struct Server {
     pub id: u32,
     pub address: String,
     pub client: Client,
+    free_connection: Semaphore,
 }
 
 lazy_static! {
@@ -24,7 +25,8 @@ lazy_static! {
                 Ok(Server {
                     id,
                     address,
-                    client: reqwest::Client::new(),
+                    client: reqwest::Client::builder().referer(false).build().unwrap(),
+                    free_connection: Semaphore::new(2),
                 })
             })
             .unwrap();
@@ -39,7 +41,9 @@ lazy_static! {
 
 impl Server {
     pub async fn download(&self, filename: &str) -> Bytes {
-        self.client
+        let block = self.free_connection.acquire().await;
+        let result = self
+            .client
             .get(&self.address)
             .query(&[("name", filename)])
             .send()
@@ -47,10 +51,14 @@ impl Server {
             .unwrap()
             .bytes()
             .await
-            .unwrap()
+            .unwrap();
+        drop(block);
+        result
     }
     pub async fn upload(&self, filename: &str, content: Vec<u8>) -> bool {
-        self.client
+        let block = self.free_connection.acquire().await;
+        let result = self
+            .client
             .post(&self.address)
             .query(&[("name", filename)])
             .body(content)
@@ -58,7 +66,9 @@ impl Server {
             .await
             .unwrap()
             .status()
-            == 202
+            == 202;
+        drop(block);
+        result
     }
 }
 

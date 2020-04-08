@@ -2,13 +2,11 @@
 extern crate lazy_static;
 
 use crate::model::file::File;
-use bytes::Bytes;
 use std::path::Path;
 use std::{env, fs};
 
 mod infrastructure;
 mod model;
-mod service;
 
 #[tokio::main]
 async fn main() {
